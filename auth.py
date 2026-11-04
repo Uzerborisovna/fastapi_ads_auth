@@ -1,4 +1,4 @@
-
+# auth.py
 import bcrypt
 import uuid
 import datetime
@@ -12,7 +12,6 @@ from config import TOKEN_TTL
 from sqlalchemy.sql import func
 from database import get_db_session
 
-# Создаем объект для заголовка безопасности, чтобы FastAPI показал замочек в /docs
 token_header = APIKeyHeader(name="x-token", auto_error=True)
 
 def hash_password(password: str) -> str:
@@ -28,16 +27,13 @@ async def check_token(
     db_session: AsyncSession = Depends(get_db_session)
 ) -> Token:
     expire_threshold = func.now() - datetime.timedelta(seconds=TOKEN_TTL)
-
     query = select(Token).where(
         Token.token == token,
         Token.creation_time >= expire_threshold
     )
     token_obj = await db_session.scalar(query)
-
     if token_obj is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-
     return token_obj
 
 async def check_object_access(
@@ -59,10 +55,13 @@ async def check_object_access(
     if need_write:
         where_args.append(Right.write == True)
 
-    # Если объект имеет поле author_id (наше объявление) и это не сам пользователь
-    if not isinstance(orm_object, type) and hasattr(orm_object, 'author_id'):
-        if orm_object.author_id != user.id:
-            where_args.append(Right.only_own == False)
+    if not isinstance(orm_object, type):
+        if hasattr(orm_object, 'author_id'):
+            if orm_object.author_id != user.id:
+                where_args.append(Right.only_own == False)
+        elif hasattr(orm_object, 'id'):
+            if orm_object.id != user.id:
+                where_args.append(Right.only_own == False)
 
     query = (
         select(func.count())

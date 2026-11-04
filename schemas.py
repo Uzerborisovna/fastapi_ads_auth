@@ -3,7 +3,6 @@ from pydantic import BaseModel, Field
 from uuid import UUID
 from datetime import datetime
 
-# --- Схемы для пользователей ---
 class UserCreate(BaseModel):
     username: str
     password: str
@@ -14,12 +13,12 @@ class UserUpdate(BaseModel):
 
 class UserResponse(BaseModel):
     id: int
-    username: str
+    username: str = Field(alias="name")
 
     class Config:
         from_attributes = True
+        populate_by_name = True
 
-# --- Схемы для логина ---
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -30,7 +29,6 @@ class LoginResponse(BaseModel):
     class Config:
         from_attributes = True
 
-# --- Схемы для объявлений ---
 class AdCreate(BaseModel):
     title: str
     description: str

@@ -1,4 +1,3 @@
-# main.py
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException
 from models import Base, engine, Session, User, Token, Advertisement, Role
@@ -11,20 +10,15 @@ from database import get_db_session
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("Starting up...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
-
-    # Инициализация ролей и прав
     async with Session() as session:
         roles = await session.scalars(select(Role))
         if not roles.first():
             from scripts import create_initial_roles
             await create_initial_roles(session)
-
     yield
-    print("Shutting down...")
     await engine.dispose()
 
 
@@ -36,7 +30,6 @@ async def root():
     return {"message": "Hello from FastAPI with Auth!"}
 
 
-# --- ЛОГИН ---
 @app.post("/login", response_model=schemas.LoginResponse)
 async def login(
         login_data: schemas.LoginRequest,
@@ -44,10 +37,8 @@ async def login(
 ):
     query = select(User).where(User.name == login_data.username)
     user = await db_session.scalar(query)
-
     if user is None or not check_password(login_data.password, user.password):
         raise HTTPException(status_code=401, detail="Incorrect username or password")
-
     new_token = Token(user=user)
     db_session.add(new_token)
     await db_session.commit()
@@ -55,7 +46,6 @@ async def login(
     return new_token
 
 
-# --- ПОЛЬЗОВАТЕЛИ ---
 @app.post("/user", response_model=schemas.IdResponse)
 async def create_user(
         user_data: schemas.UserCreate,
@@ -63,18 +53,15 @@ async def create_user(
 ):
     hashed_password = hash_password(user_data.password)
     new_user = User(name=user_data.username, password=hashed_password)
-
     role_user = await db_session.scalar(select(Role).where(Role.name == "user"))
     if role_user:
         new_user.roles.append(role_user)
-
     db_session.add(new_user)
     try:
         await db_session.commit()
     except Exception:
         await db_session.rollback()
         raise HTTPException(status_code=400, detail="Username already exists")
-
     await db_session.refresh(new_user)
     return {"id": new_user.id}
 
@@ -95,8 +82,12 @@ async def get_all_users(
         db_session: AsyncSession = Depends(get_db_session),
         token_obj: Token = Depends(check_token)
 ):
+    is_admin = any(role.name == "admin" for role in token_obj.user.roles)
+    if not is_admin:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     users = await db_session.scalars(select(User))
-    return users.all()
+    return users.unique().all()
 
 
 @app.patch("/user/{user_id}", response_model=schemas.UserResponse)
@@ -110,17 +101,13 @@ async def update_user(
     if not user_to_update:
         raise HTTPException(status_code=404, detail="User not found")
 
-    has_access = await check_object_access(
-        user=token_obj.user, orm_object=user_to_update, db_session=db_session, need_write=True
-    )
-    if not has_access:
+    if token_obj.user_id != user_id and not any(role.name == "admin" for role in token_obj.user.roles):
         raise HTTPException(status_code=403, detail="Access denied")
 
     if user_data.username:
         user_to_update.name = user_data.username
     if user_data.password:
         user_to_update.password = hash_password(user_data.password)
-
     await db_session.commit()
     await db_session.refresh(user_to_update)
     return user_to_update
@@ -136,10 +123,7 @@ async def delete_user(
     if not user_to_delete:
         raise HTTPException(status_code=404, detail="User not found")
 
-    has_access = await check_object_access(
-        user=token_obj.user, orm_object=user_to_delete, db_session=db_session, need_write=True
-    )
-    if not has_access:
+    if token_obj.user_id != user_id and not any(role.name == "admin" for role in token_obj.user.roles):
         raise HTTPException(status_code=403, detail="Access denied")
 
     await db_session.delete(user_to_delete)
@@ -147,7 +131,6 @@ async def delete_user(
     return {"message": "User deleted"}
 
 
-# --- ОБЪЯВЛЕНИЯ ---
 @app.post("/advertisement", response_model=schemas.AdResponse)
 async def create_ad(
         ad: schemas.AdCreate,
@@ -155,18 +138,8 @@ async def create_ad(
         db_session: AsyncSession = Depends(get_db_session)
 ):
     new_ad = Advertisement(
-        title=ad.title,
-        description=ad.description,
-        price=ad.price,
-        author_id=token_obj.user_id
+        title=ad.title, description=ad.description, price=ad.price, author_id=token_obj.user_id
     )
-
-    has_access = await check_object_access(
-        user=token_obj.user, orm_object=Advertisement, db_session=db_session, need_write=True
-    )
-    if not has_access:
-        raise HTTPException(status_code=403, detail="Access denied")
-
     db_session.add(new_ad)
     await db_session.commit()
     await db_session.refresh(new_ad)
@@ -195,16 +168,12 @@ async def update_ad(
     if not ad:
         raise HTTPException(status_code=404, detail="Advertisement not found")
 
-    has_access = await check_object_access(
-        user=token_obj.user, orm_object=ad, db_session=db_session, need_write=True
-    )
-    if not has_access:
+    if ad.author_id != token_obj.user_id and not any(role.name == "admin" for role in token_obj.user.roles):
         raise HTTPException(status_code=403, detail="Access denied")
 
     update_data = ad_update.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(ad, key, value)
-
     await db_session.commit()
     await db_session.refresh(ad)
     return ad
@@ -220,10 +189,7 @@ async def delete_ad(
     if not ad:
         raise HTTPException(status_code=404, detail="Advertisement not found")
 
-    has_access = await check_object_access(
-        user=token_obj.user, orm_object=ad, db_session=db_session, need_write=True
-    )
-    if not has_access:
+    if ad.author_id != token_obj.user_id and not any(role.name == "admin" for role in token_obj.user.roles):
         raise HTTPException(status_code=403, detail="Access denied")
 
     await db_session.delete(ad)
@@ -248,6 +214,5 @@ async def search_ads(
         query = query.where(Advertisement.author_id == author_id)
     if min_price is not None:
         query = query.where(Advertisement.price >= min_price)
-
     result = await db_session.execute(query)
     return result.scalars().all()
